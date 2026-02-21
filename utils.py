@@ -1,26 +1,7 @@
 import os
-import shutil
 from datetime import datetime
 from typing import List
 import pandas as pd
-from config import PHOTOS_DIR, EXPORTS_DIR
-
-def cleanup_old_files(days: int = 7):
-    """
-    Очищает старые временные файлы
-    Args:
-        days: количество дней, после которого файлы удаляются
-    """
-    now = datetime.now().timestamp()
-    
-    for directory in [PHOTOS_DIR, EXPORTS_DIR]:
-        if os.path.exists(directory):
-            for filename in os.listdir(directory):
-                filepath = os.path.join(directory, filename)
-                if os.path.isfile(filepath):
-                    file_time = os.path.getmtime(filepath)
-                    if now - file_time > days * 24 * 60 * 60:
-                        os.remove(filepath)
 
 def create_excel_export(entries: List[dict], user_id: int) -> str:
     """
@@ -28,6 +9,9 @@ def create_excel_export(entries: List[dict], user_id: int) -> str:
     Returns:
         путь к созданному файлу
     """
+    # Создаем директорию для экспорта, если её нет
+    os.makedirs('exports', exist_ok=True)
+    
     # Подготавливаем данные
     data = []
     for entry in entries:
@@ -44,7 +28,7 @@ def create_excel_export(entries: List[dict], user_id: int) -> str:
     
     # Сохраняем в Excel
     filename = f"export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    filepath = os.path.join(EXPORTS_DIR, filename)
+    filepath = os.path.join('exports', filename)
     df.to_excel(filepath, index=False, engine='openpyxl')
     
     return filepath
@@ -58,8 +42,11 @@ def format_entry_preview(entry: dict) -> str:
     ]
     
     if 'timestamp' in entry:
-        dt = datetime.fromisoformat(entry['timestamp'])
-        lines.append(f"🕐 {dt.strftime('%d.%m.%Y %H:%M')}")
+        try:
+            dt = datetime.fromisoformat(entry['timestamp'])
+            lines.append(f"🕐 {dt.strftime('%d.%m.%Y %H:%M')}")
+        except:
+            pass
     
     return '\n'.join(lines)
 
@@ -72,3 +59,16 @@ def validate_photo(file_path: str) -> bool:
         return True
     except Exception:
         return False
+
+def cleanup_old_files(days: int = 7):
+    """Очищает старые временные файлы"""
+    now = datetime.now().timestamp()
+    
+    for directory in ['photos', 'exports']:
+        if os.path.exists(directory):
+            for filename in os.listdir(directory):
+                filepath = os.path.join(directory, filename)
+                if os.path.isfile(filepath):
+                    file_time = os.path.getmtime(filepath)
+                    if now - file_time > days * 24 * 60 * 60:
+                        os.remove(filepath)
