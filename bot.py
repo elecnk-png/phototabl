@@ -1,6 +1,5 @@
 import logging
 import os
-import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
@@ -8,10 +7,10 @@ from telegram.ext import (
 )
 from datetime import datetime
 from config import (
-    BOT_TOKEN, MAX_PHOTOS_PER_ENTRY, LOG_LEVEL, LOG_FORMAT, DEBUG
+    BOT_TOKEN, MAX_PHOTOS_PER_ENTRY, LOG_LEVEL, LOG_FORMAT
 )
 from database import db
-from utils import create_excel_with_images, format_entry_preview, validate_photo, cleanup_old_files
+from utils import create_excel_with_embedded_photos, format_entry_preview, validate_photo, cleanup_old_files
 
 # Настройка логирования
 logging.basicConfig(format=LOG_FORMAT, level=getattr(logging, LOG_LEVEL))
@@ -34,7 +33,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Очищаем временные данные при старте
     if user_id in temp_data:
-        # Удаляем временные фото
         for photo in temp_data[user_id].get('photos', []):
             try:
                 if os.path.exists(photo):
@@ -71,8 +69,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ Введите описание\n"
         "4️⃣ Загрузите фотографии (до 5 шт.)\n"
         "5️⃣ Нажмите кнопку '✅ Готово' для сохранения\n\n"
-        "📸 Поддерживаются форматы: JPG, PNG, GIF\n"
-        "📊 В Excel файле фото будут отображаться прямо в таблице"
+        "📸 Поддерживаются форматы: JPG, PNG\n"
+        "📊 В Excel файле фото будут ВСТРОЕНЫ прямо в таблицу"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -82,7 +80,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     
     if user_id in temp_data:
-        # Удаляем загруженные фото
         for photo in temp_data[user_id].get('photos', []):
             try:
                 if os.path.exists(photo):
@@ -151,7 +148,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_data[user_id]['description'] = text
         context.user_data['state'] = UserState.UPLOAD_PHOTO
         
-        # Создаем клавиатуру с кнопкой "Готово"
         keyboard = [[InlineKeyboardButton("✅ Готово", callback_data='done_upload')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -216,8 +212,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Создаем уникальное имя файла
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_extension = 'jpg'  # Telegram всегда отправляет в jpg
-        filename = f"photos/photo_{user_id}_{timestamp}_{len(current_photos)}.{file_extension}"
+        filename = f"photos/photo_{user_id}_{timestamp}_{len(current_photos)}.jpg"
         
         # Скачиваем фото
         logger.info(f"Скачивание фото в {filename}")
@@ -235,7 +230,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 remaining = MAX_PHOTOS_PER_ENTRY - len(current_photos)
                 
-                # Создаем клавиатуру с кнопкой "Готово"
                 keyboard = [[InlineKeyboardButton("✅ Готово", callback_data='done_upload')]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
@@ -312,9 +306,12 @@ async def _save_entry_data(user, message_or_query, context):
     entries = db.get_user_entries(user_id)
     saved_entry = entries[-1] if entries else entry_data
     
-    # Очищаем временные данные
+    # Очищаем временные данные (но НЕ удаляем фото, они теперь в БД)
     if user_id in temp_data:
+        # Не удаляем фото, они нужны для будущего экспорта
+        # Просто очищаем временные данные
         del temp_data[user_id]
+    
     context.user_data['state'] = UserState.MAIN
     
     # Формируем ответ
@@ -327,6 +324,7 @@ async def _save_entry_data(user, message_or_query, context):
     keyboard = [
         [InlineKeyboardButton("➕ Добавить ещё", callback_data='add')],
         [InlineKeyboardButton("📊 Мои записи", callback_data='view')],
+        [InlineKeyboardButton("📥 Экспорт в Excel", callback_data='export')],
         [InlineKeyboardButton("🏠 Главное меню", callback_data='main')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -382,7 +380,7 @@ async def show_entries(query, context):
     )
 
 async def export_entries(query, context):
-    """Экспорт записей в Excel с изображениями"""
+    """Экспорт записей в Excel с ВСТРОЕННЫМИ изображениями"""
     user_id = query.from_user.id
     entries = db.get_user_entries(user_id)
     
@@ -393,7 +391,7 @@ async def export_entries(query, context):
     try:
         # Отправляем сообщение о начале экспорта
         await query.edit_message_text(
-            "⏳ Создаю Excel файл с изображениями, пожалуйста подождите...\n"
+            "⏳ Создаю Excel файл с ВСТРОЕННЫМИ фотографиями...\n"
             "Это может занять несколько секунд..."
         )
         
@@ -401,8 +399,8 @@ async def export_entries(query, context):
         total_photos = sum(len(entry.get('photos', [])) for entry in entries)
         logger.info(f"Начинаем экспорт {len(entries)} записей с {total_photos} фото")
         
-        # Создаем Excel файл с изображениями
-        filepath = create_excel_with_images(entries, user_id)
+        # Создаем Excel файл с ВСТРОЕННЫМИ изображениями
+        filepath = create_excel_with_embedded_photos(entries, user_id)
         
         # Проверяем что файл создан
         if os.path.exists(filepath):
@@ -415,8 +413,10 @@ async def export_entries(query, context):
                     chat_id=user_id,
                     document=f,
                     filename=os.path.basename(filepath),
-                    caption="📥 Ваш экспорт данных с фотографиями\n\n"
-                            "В колонке 'Фото' должны отображаться изображения!"
+                    caption=f"📥 Ваш экспорт данных\n"
+                            f"📸 Всего фото: {total_photos}\n"
+                            f"📦 Размер файла: {file_size/1024:.1f} KB\n\n"
+                            f"✅ Фото ВСТРОЕНЫ в файл!"
                 )
             
             # Удаляем временный файл
@@ -429,50 +429,18 @@ async def export_entries(query, context):
             
             await context.bot.send_message(
                 chat_id=user_id,
-                text="✅ Экспорт завершен! Файл с фотографиями отправлен.",
+                text="✅ Экспорт завершен! Файл с встроенными фото отправлен.",
                 reply_markup=reply_markup
             )
         else:
-            logger.error(f"Excel файл не создан: {filepath}")
+            logger.error(f"Excel файл не создан")
             await query.edit_message_text("❌ Ошибка при создании Excel файла")
         
     except Exception as e:
-        logger.error(f"Ошибка экспорта с изображениями: {e}")
-        
-        # Пробуем создать простой Excel без изображений
-        try:
-            await query.edit_message_text(
-                "⚠️ Создаю упрощенный Excel файл (без встроенных фото)..."
-            )
-            
-            from utils import create_simple_excel
-            filepath = create_simple_excel(entries, user_id)
-            
-            with open(filepath, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=user_id,
-                    document=f,
-                    filename=os.path.basename(filepath),
-                    caption="📥 Упрощенный экспорт\n"
-                           "Пути к фото указаны в колонке 'Файлы фото'"
-                )
-            
-            os.remove(filepath)
-            
-            keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data='main')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="✅ Упрощенный экспорт завершен!",
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e2:
-            logger.error(f"Ошибка упрощенного экспорта: {e2}")
-            await query.edit_message_text(
-                "❌ Ошибка при экспорте. Пожалуйста, попробуйте позже."
-            )
+        logger.error(f"Ошибка экспорта: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при экспорте. Пожалуйста, попробуйте позже."
+        )
 
 async def main_menu(query, context):
     """Возврат в главное меню"""
