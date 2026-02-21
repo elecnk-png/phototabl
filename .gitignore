@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Проектные директории
+/photos/
+/exports/
+*.xlsx
+*.xls
+*.log
+
+# Конфигурация с секретами
+.env
+config_local.py
+*.token
+
+# БД
+*.db
+*.sqlite3
+
+# Временные файлы
+tmp/
+temp/
+*.tmp
