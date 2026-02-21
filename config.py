@@ -1,20 +1,17 @@
 import os
-from dotenv import load_dotenv
 
-# Загружаем переменные окружения
-load_dotenv()
-
-# Токен бота (обязательно из переменных окружения)
+# Токен бота из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+
+if not BOT_TOKEN:
+    raise ValueError("Не задан BOT_TOKEN в переменных окружения!")
 
 # Настройки бота
 MAX_PHOTOS_PER_ENTRY = 5
-PHOTOS_DIR = 'photos'
-EXPORTS_DIR = 'exports'
 
-# Создаем директории, если их нет
-os.makedirs(PHOTOS_DIR, exist_ok=True)
-os.makedirs(EXPORTS_DIR, exist_ok=True)
+# Создаем необходимые директории
+os.makedirs('photos', exist_ok=True)
+os.makedirs('exports', exist_ok=True)
 
 # Настройки логирования
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
