@@ -83,12 +83,12 @@ def create_excel_with_embedded_photos(entries: List[dict], user_id: int) -> str:
                             # Изменяем размер
                             img.thumbnail((180, 120), Image.Resampling.LANCZOS)
                             
-                            # Сохраняем в байтовый поток (в память, а не на диск!)
+                            # Сохраняем в байтовый поток
                             img_bytes = io.BytesIO()
                             img.save(img_bytes, format='PNG')
                             img_bytes.seek(0)
                             
-                            # Создаем изображение для Excel из байтового потока
+                            # Создаем изображение для Excel
                             xl_img = XLImage(img_bytes)
                             
                             # ВСТРАИВАЕМ в ячейку D
@@ -127,37 +127,40 @@ def create_excel_with_embedded_photos(entries: List[dict], user_id: int) -> str:
         filepath = os.path.join('exports', filename)
         wb.save(filepath)
         
-        # Проверяем размер файла (должен быть большим, если фото встроены)
-        file_size = os.path.getsize(filepath)
-        logger.info(f"✅ Excel файл создан: {filepath}, размер: {file_size} байт")
+        # Проверяем размер файла
+        if os.path.exists(filepath):
+            file_size = os.path.getsize(filepath)
+            logger.info(f"✅ Excel файл создан: {filepath}, размер: {file_size} байт")
+        else:
+            logger.error("❌ Файл не был создан!")
         
         return filepath
         
     except Exception as e:
         logger.error(f"❌ Ошибка при создании Excel: {e}")
+        # В случае ошибки создаем простой Excel
         return create_simple_excel(entries, user_id)
 
 def create_simple_excel(entries: List[dict], user_id: int) -> str:
-    """Создает простой Excel файл без фото"""
+    """Создает простой Excel файл без изображений"""
     try:
         os.makedirs('exports', exist_ok=True)
         
         data = []
         for entry in entries:
-            # Формируем информацию о фото
             photos = entry.get('photos', [])
-            photo_info = []
+            photo_names = []
             for path in photos:
                 if os.path.exists(path):
-                    photo_info.append(os.path.basename(path))
+                    photo_names.append(os.path.basename(path))
                 else:
-                    photo_info.append("[файл не найден]")
+                    photo_names.append("[файл не найден]")
             
             data.append({
                 'Название': entry.get('name', ''),
                 'Описание': entry.get('description', ''),
                 'Количество фото': len(photos),
-                'Файлы фото': ', '.join(photo_info) if photo_info else 'Нет фото',
+                'Файлы фото': ', '.join(photo_names) if photo_names else 'Нет фото',
                 'Дата создания': entry.get('timestamp', '')
             })
         
@@ -184,31 +187,11 @@ def create_simple_excel(entries: List[dict], user_id: int) -> str:
                 worksheet.column_dimensions[column_letter].width = adjusted_width
         
         logger.info(f"✅ Простой Excel файл создан: {filename}")
-        return filename
+        return filepath
         
     except Exception as e:
         logger.error(f"❌ Ошибка при создании простого Excel: {e}")
         raise
-
-def validate_photo(file_path: str) -> bool:
-    """Проверяет фото"""
-    try:
-        if not os.path.exists(file_path):
-            logger.warning(f"Файл не существует: {file_path}")
-            return False
-        
-        with Image.open(file_path) as img:
-            img.verify()
-        
-        with Image.open(file_path) as img:
-            img.load()
-        
-        logger.info(f"✅ Фото проверено: {os.path.basename(file_path)}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка валидации: {e}")
-        return False
 
 def format_entry_preview(entry: dict) -> str:
     """Форматирует запись для предпросмотра"""
@@ -223,6 +206,96 @@ def format_entry_preview(entry: dict) -> str:
             dt = datetime.fromisoformat(entry['timestamp'])
             lines.append(f"🕐 {dt.strftime('%d.%m.%Y %H:%M')}")
         except:
-            pass
+            lines.append(f"🕐 {entry['timestamp']}")
     
     return '\n'.join(lines)
+
+def validate_photo(file_path: str) -> bool:
+    """Проверяет, является ли файл корректным изображением"""
+    try:
+        if not os.path.exists(file_path):
+            logger.warning(f"Файл не существует: {file_path}")
+            return False
+        
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            logger.warning(f"Файл пустой: {file_path}")
+            return False
+        
+        if file_size > 20 * 1024 * 1024:
+            logger.warning(f"Файл слишком большой: {file_size} байт")
+            return False
+        
+        # Проверяем что это изображение
+        with Image.open(file_path) as img:
+            img.verify()
+        
+        # Дополнительная проверка
+        with Image.open(file_path) as img:
+            img.load()
+            logger.info(f"✅ Фото проверено: {os.path.basename(file_path)}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка валидации фото {file_path}: {e}")
+        return False
+
+# ДОБАВЛЯЕМ ЭТУ ФУНКЦИЮ
+def cleanup_old_files(days: int = 7):
+    """Очищает старые файлы"""
+    try:
+        now = datetime.now().timestamp()
+        deleted = 0
+        errors = 0
+        
+        for directory in ['photos', 'exports']:
+            if os.path.exists(directory):
+                for filename in os.listdir(directory):
+                    filepath = os.path.join(directory, filename)
+                    if os.path.isfile(filepath):
+                        try:
+                            file_time = os.path.getmtime(filepath)
+                            if now - file_time > days * 24 * 60 * 60:
+                                os.remove(filepath)
+                                deleted += 1
+                                logger.info(f"Удален старый файл: {filepath}")
+                        except Exception as e:
+                            errors += 1
+                            logger.error(f"Ошибка при удалении {filepath}: {e}")
+        
+        logger.info(f"Очистка завершена. Удалено файлов: {deleted}, ошибок: {errors}")
+        return deleted
+    except Exception as e:
+        logger.error(f"Ошибка при очистке файлов: {e}")
+        return 0
+
+def get_photo_stats(entries: List[dict]) -> dict:
+    """Получает статистику по фото"""
+    try:
+        total_photos = 0
+        entries_with_photos = 0
+        total_size = 0
+        
+        for entry in entries:
+            photos = entry.get('photos', [])
+            if photos:
+                entries_with_photos += 1
+                total_photos += len(photos)
+                
+                for photo_path in photos:
+                    if os.path.exists(photo_path):
+                        try:
+                            total_size += os.path.getsize(photo_path)
+                        except:
+                            pass
+        
+        return {
+            'total_entries': len(entries),
+            'entries_with_photos': entries_with_photos,
+            'total_photos': total_photos,
+            'total_size_mb': round(total_size / (1024 * 1024), 2)
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики: {e}")
+        return {}
