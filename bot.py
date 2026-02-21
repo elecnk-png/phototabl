@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
@@ -10,7 +11,7 @@ from config import (
     BOT_TOKEN, MAX_PHOTOS_PER_ENTRY, LOG_LEVEL, LOG_FORMAT, DEBUG
 )
 from database import db
-from utils import create_excel_with_images, format_entry_preview, validate_photo
+from utils import create_excel_with_images, format_entry_preview, validate_photo, cleanup_old_files
 
 # Настройка логирования
 logging.basicConfig(format=LOG_FORMAT, level=getattr(logging, LOG_LEVEL))
@@ -36,7 +37,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Удаляем временные фото
         for photo in temp_data[user_id].get('photos', []):
             try:
-                os.remove(photo)
+                if os.path.exists(photo):
+                    os.remove(photo)
             except:
                 pass
         del temp_data[user_id]
@@ -160,7 +162,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif state == UserState.UPLOAD_PHOTO:
-        # Если пользователь ввел текст вместо фото
         if text == '/done':
             await save_entry(update, context)
         else:
@@ -169,7 +170,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     
     else:
-        # Если состояние не определено
         keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data='main')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
@@ -208,45 +208,58 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Получаем фото
+        # Получаем фото максимального качества
         photo_file = await update.message.photo[-1].get_file()
         
         # Создаем директорию для фото
         os.makedirs('photos', exist_ok=True)
         
-        # Сохраняем фото
+        # Создаем уникальное имя файла
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"photos/photo_{user_id}_{timestamp}_{len(current_photos)}.jpg"
+        file_extension = 'jpg'  # Telegram всегда отправляет в jpg
+        filename = f"photos/photo_{user_id}_{timestamp}_{len(current_photos)}.{file_extension}"
+        
+        # Скачиваем фото
+        logger.info(f"Скачивание фото в {filename}")
         await photo_file.download_to_drive(filename)
         
-        # Проверяем фото
-        if validate_photo(filename):
-            current_photos.append(filename)
-            temp_data[user_id]['photos'] = current_photos
+        # Проверяем что файл скачался
+        if os.path.exists(filename):
+            file_size = os.path.getsize(filename)
+            logger.info(f"Фото скачано, размер: {file_size} байт")
             
-            remaining = MAX_PHOTOS_PER_ENTRY - len(current_photos)
-            
-            # Создаем клавиатуру с кнопкой "Готово"
-            keyboard = [[InlineKeyboardButton("✅ Готово", callback_data='done_upload')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            if remaining > 0:
-                await update.message.reply_text(
-                    f"✅ Фото сохранено!\n"
-                    f"📸 Загружено: {len(current_photos)}/{MAX_PHOTOS_PER_ENTRY}\n"
-                    f"Осталось мест: {remaining}",
-                    reply_markup=reply_markup
-                )
+            # Проверяем фото
+            if validate_photo(filename):
+                current_photos.append(filename)
+                temp_data[user_id]['photos'] = current_photos
+                
+                remaining = MAX_PHOTOS_PER_ENTRY - len(current_photos)
+                
+                # Создаем клавиатуру с кнопкой "Готово"
+                keyboard = [[InlineKeyboardButton("✅ Готово", callback_data='done_upload')]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                if remaining > 0:
+                    await update.message.reply_text(
+                        f"✅ Фото сохранено!\n"
+                        f"📸 Загружено: {len(current_photos)}/{MAX_PHOTOS_PER_ENTRY}\n"
+                        f"Осталось мест: {remaining}",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ Все фото загружены! Нажмите '✅ Готово' для сохранения.",
+                        reply_markup=reply_markup
+                    )
             else:
+                os.remove(filename)
                 await update.message.reply_text(
-                    f"✅ Все фото загружены! Нажмите '✅ Готово' для сохранения.",
-                    reply_markup=reply_markup
+                    "❌ Файл поврежден или не является изображением. Попробуйте другое фото."
                 )
         else:
-            os.remove(filename)
-            await update.message.reply_text(
-                "❌ Файл поврежден или не является изображением. Попробуйте другое фото."
-            )
+            logger.error(f"Файл не создан: {filename}")
+            await update.message.reply_text("❌ Ошибка при сохранении фото. Попробуйте еще раз.")
+            
     except Exception as e:
         logger.error(f"Ошибка при сохранении фото: {e}")
         await update.message.reply_text(
@@ -348,7 +361,7 @@ async def show_entries(query, context):
     
     # Формируем сообщение
     text = "📊 *Ваши записи:*\n\n"
-    for i, entry in enumerate(entries[-5:], 1):  # Показываем последние 5
+    for i, entry in enumerate(entries[-5:], 1):
         text += f"{i}. {format_entry_preview(entry)}\n"
         text += "─" * 20 + "\n"
     
@@ -384,31 +397,44 @@ async def export_entries(query, context):
             "Это может занять несколько секунд..."
         )
         
+        # Проверяем наличие фото
+        total_photos = sum(len(entry.get('photos', [])) for entry in entries)
+        logger.info(f"Начинаем экспорт {len(entries)} записей с {total_photos} фото")
+        
         # Создаем Excel файл с изображениями
         filepath = create_excel_with_images(entries, user_id)
         
-        # Отправляем файл
-        with open(filepath, 'rb') as f:
-            await context.bot.send_document(
+        # Проверяем что файл создан
+        if os.path.exists(filepath):
+            file_size = os.path.getsize(filepath)
+            logger.info(f"Excel файл создан, размер: {file_size} байт")
+            
+            # Отправляем файл
+            with open(filepath, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=user_id,
+                    document=f,
+                    filename=os.path.basename(filepath),
+                    caption="📥 Ваш экспорт данных с фотографиями\n\n"
+                            "В колонке 'Фото' должны отображаться изображения!"
+                )
+            
+            # Удаляем временный файл
+            os.remove(filepath)
+            logger.info(f"Временный файл удален: {filepath}")
+            
+            # Возвращаемся в меню
+            keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data='main')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(
                 chat_id=user_id,
-                document=f,
-                filename=os.path.basename(filepath),
-                caption="📥 Ваш экспорт данных с фотографиями\n\n"
-                        "В колонке 'Фото' отображаются сами изображения!"
+                text="✅ Экспорт завершен! Файл с фотографиями отправлен.",
+                reply_markup=reply_markup
             )
-        
-        # Удаляем временный файл
-        os.remove(filepath)
-        
-        # Возвращаемся в меню
-        keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data='main')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="✅ Экспорт завершен! Файл с фотографиями отправлен.",
-            reply_markup=reply_markup
-        )
+        else:
+            logger.error(f"Excel файл не создан: {filepath}")
+            await query.edit_message_text("❌ Ошибка при создании Excel файла")
         
     except Exception as e:
         logger.error(f"Ошибка экспорта с изображениями: {e}")
@@ -428,7 +454,7 @@ async def export_entries(query, context):
                     document=f,
                     filename=os.path.basename(filepath),
                     caption="📥 Упрощенный экспорт\n"
-                           "Пути к фото указаны в колонке 'Пути к фото'"
+                           "Пути к фото указаны в колонке 'Файлы фото'"
                 )
             
             os.remove(filepath)
@@ -489,6 +515,9 @@ def main():
     # Создаем необходимые директории
     os.makedirs('photos', exist_ok=True)
     os.makedirs('exports', exist_ok=True)
+    
+    # Очищаем старые файлы при запуске
+    cleanup_old_files(days=1)
     
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
