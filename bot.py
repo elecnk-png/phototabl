@@ -10,7 +10,7 @@ from config import (
     BOT_TOKEN, MAX_PHOTOS_PER_ENTRY, LOG_LEVEL, LOG_FORMAT, DEBUG
 )
 from database import db
-from utils import create_excel_export, format_entry_preview, validate_photo
+from utils import create_excel_with_images, format_entry_preview, validate_photo
 
 # Настройка логирования
 logging.basicConfig(format=LOG_FORMAT, level=getattr(logging, LOG_LEVEL))
@@ -33,6 +33,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Очищаем временные данные при старте
     if user_id in temp_data:
+        # Удаляем временные фото
+        for photo in temp_data[user_id].get('photos', []):
+            try:
+                os.remove(photo)
+            except:
+                pass
         del temp_data[user_id]
     
     keyboard = [
@@ -44,24 +50,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "👋 Добро пожаловать! Выберите действие:",
+        "👋 Добро пожаловать в Table Bot!\n\n"
+        "Я помогу вам создавать таблицы с информацией и фотографиями.\n"
+        "Выберите действие:",
         reply_markup=reply_markup
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = (
-        "🤖 *Справка*\n\n"
+        "🤖 *Справка по командам*\n\n"
         "/start - Главное меню\n"
         "/help - Эта справка\n"
-        "/cancel - Отмена\n\n"
+        "/cancel - Отмена текущего действия\n\n"
         "*Как пользоваться:*\n"
         "1️⃣ Нажмите 'Добавить запись'\n"
         "2️⃣ Введите название\n"
         "3️⃣ Введите описание\n"
-        "4️⃣ Загрузите фото (до 5 шт.)\n"
+        "4️⃣ Загрузите фотографии (до 5 шт.)\n"
         "5️⃣ Нажмите кнопку '✅ Готово' для сохранения\n\n"
-        "📸 Поддерживаются форматы: JPG, PNG"
+        "📸 Поддерживаются форматы: JPG, PNG, GIF\n"
+        "📊 В Excel файле фото будут отображаться прямо в таблице"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -69,16 +78,21 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена текущего действия"""
     user_id = update.effective_user.id
     context.user_data.clear()
+    
     if user_id in temp_data:
         # Удаляем загруженные фото
         for photo in temp_data[user_id].get('photos', []):
             try:
-                os.remove(photo)
-            except:
-                pass
+                if os.path.exists(photo):
+                    os.remove(photo)
+                    logger.info(f"Удалено временное фото: {photo}")
+            except Exception as e:
+                logger.error(f"Ошибка при удалении фото {photo}: {e}")
         del temp_data[user_id]
     
-    await update.message.reply_text("❌ Действие отменено. Используйте /start")
+    await update.message.reply_text(
+        "❌ Действие отменено. Используйте /start для нового действия."
+    )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки"""
@@ -101,15 +115,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'stats':
         stats = db.get_stats()
         text = (
-            "📊 *Статистика*\n\n"
+            "📊 *Статистика бота*\n\n"
             f"👥 Пользователей: {stats['total_users']}\n"
-            f"📝 Записей: {stats['total_entries']}\n"
-            f"📸 Фото: {stats['total_photos']}"
+            f"📝 Всего записей: {stats['total_entries']}\n"
+            f"📸 Всего фото: {stats['total_photos']}"
         )
         await query.edit_message_text(text, parse_mode='Markdown')
     
     elif query.data == 'done_upload':
         await save_entry_from_callback(query, context)
+    
+    elif query.data == 'main':
+        await main_menu(query, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
@@ -150,6 +167,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "Пожалуйста, загрузите фото или нажмите кнопку '✅ Готово'"
             )
+    
+    else:
+        # Если состояние не определено
+        keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data='main')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "Используйте /start для начала работы",
+            reply_markup=reply_markup
+        )
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик фотографий"""
@@ -213,7 +239,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 await update.message.reply_text(
-                    f"✅ Все фото загружены! Нажмите 'Готово' для сохранения.",
+                    f"✅ Все фото загружены! Нажмите '✅ Готово' для сохранения.",
                     reply_markup=reply_markup
                 )
         else:
@@ -223,14 +249,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         logger.error(f"Ошибка при сохранении фото: {e}")
-        await update.message.reply_text("❌ Ошибка при сохранении фото. Попробуйте еще раз.")
+        await update.message.reply_text(
+            "❌ Ошибка при сохранении фото. Попробуйте еще раз."
+        )
 
 async def save_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сохранение записи из текстовой команды"""
     user_id = update.effective_user.id
     
     if user_id not in temp_data:
-        await update.message.reply_text("❌ Нет данных для сохранения. Начните заново через /start")
+        await update.message.reply_text(
+            "❌ Нет данных для сохранения. Начните заново через /start"
+        )
         return
     
     await _save_entry_data(update.effective_user, update.message, context)
@@ -240,7 +270,9 @@ async def save_entry_from_callback(query, context):
     user_id = query.from_user.id
     
     if user_id not in temp_data:
-        await query.edit_message_text("❌ Нет данных для сохранения. Начните заново через /start")
+        await query.edit_message_text(
+            "❌ Нет данных для сохранения. Начните заново через /start"
+        )
         return
     
     await _save_entry_data(query.from_user, query, context)
@@ -337,7 +369,7 @@ async def show_entries(query, context):
     )
 
 async def export_entries(query, context):
-    """Экспорт записей в Excel"""
+    """Экспорт записей в Excel с изображениями"""
     user_id = query.from_user.id
     entries = db.get_user_entries(user_id)
     
@@ -347,10 +379,13 @@ async def export_entries(query, context):
     
     try:
         # Отправляем сообщение о начале экспорта
-        await query.edit_message_text("⏳ Создаю файл Excel, пожалуйста подождите...")
+        await query.edit_message_text(
+            "⏳ Создаю Excel файл с изображениями, пожалуйста подождите...\n"
+            "Это может занять несколько секунд..."
+        )
         
-        # Создаем Excel файл
-        filepath = create_excel_export(entries, user_id)
+        # Создаем Excel файл с изображениями
+        filepath = create_excel_with_images(entries, user_id)
         
         # Отправляем файл
         with open(filepath, 'rb') as f:
@@ -358,7 +393,8 @@ async def export_entries(query, context):
                 chat_id=user_id,
                 document=f,
                 filename=os.path.basename(filepath),
-                caption="📥 Ваш экспорт данных"
+                caption="📥 Ваш экспорт данных с фотографиями\n\n"
+                        "В колонке 'Фото' отображаются сами изображения!"
             )
         
         # Удаляем временный файл
@@ -370,18 +406,62 @@ async def export_entries(query, context):
         
         await context.bot.send_message(
             chat_id=user_id,
-            text="✅ Экспорт завершен! Файл отправлен.",
+            text="✅ Экспорт завершен! Файл с фотографиями отправлен.",
             reply_markup=reply_markup
         )
         
     except Exception as e:
-        logger.error(f"Ошибка экспорта: {e}")
-        await query.edit_message_text("❌ Ошибка при экспорте. Попробуйте позже.")
+        logger.error(f"Ошибка экспорта с изображениями: {e}")
+        
+        # Пробуем создать простой Excel без изображений
+        try:
+            await query.edit_message_text(
+                "⚠️ Создаю упрощенный Excel файл (без встроенных фото)..."
+            )
+            
+            from utils import create_simple_excel
+            filepath = create_simple_excel(entries, user_id)
+            
+            with open(filepath, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=user_id,
+                    document=f,
+                    filename=os.path.basename(filepath),
+                    caption="📥 Упрощенный экспорт\n"
+                           "Пути к фото указаны в колонке 'Пути к фото'"
+                )
+            
+            os.remove(filepath)
+            
+            keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data='main')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="✅ Упрощенный экспорт завершен!",
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e2:
+            logger.error(f"Ошибка упрощенного экспорта: {e2}")
+            await query.edit_message_text(
+                "❌ Ошибка при экспорте. Пожалуйста, попробуйте позже."
+            )
 
 async def main_menu(query, context):
     """Возврат в главное меню"""
     user_id = query.from_user.id
     context.user_data['state'] = UserState.MAIN
+    
+    # Очищаем временные данные при возврате в меню
+    if user_id in temp_data:
+        for photo in temp_data[user_id].get('photos', []):
+            try:
+                if os.path.exists(photo):
+                    os.remove(photo)
+            except:
+                pass
+        del temp_data[user_id]
     
     keyboard = [
         [InlineKeyboardButton("➕ Добавить запись", callback_data='add')],
@@ -396,10 +476,14 @@ async def main_menu(query, context):
         reply_markup=reply_markup
     )
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Ошибка: {context.error}")
+
 def main():
     """Запуск бота"""
     if not BOT_TOKEN:
-        logger.error("❌ Не указан BOT_TOKEN!")
+        logger.error("❌ Не указан BOT_TOKEN в переменных окружения!")
         return
     
     # Создаем необходимые директории
@@ -415,16 +499,23 @@ def main():
     application.add_handler(CommandHandler("cancel", cancel))
     
     # Регистрируем обработчики callback-кнопок
-    application.add_handler(CallbackQueryHandler(button_callback, pattern='^(?!main$).*$'))
-    application.add_handler(CallbackQueryHandler(main_menu, pattern='^main$'))
+    application.add_handler(CallbackQueryHandler(button_callback))
     
     # Регистрируем обработчики сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
+    # Регистрируем обработчик ошибок
+    application.add_error_handler(error_handler)
+    
     # Запускаем бота
     logger.info("🚀 Бот запущен и готов к работе!")
-    application.run_polling()
+    logger.info(f"📸 Максимум фото на запись: {MAX_PHOTOS_PER_ENTRY}")
+    
+    try:
+        application.run_polling()
+    except Exception as e:
+        logger.error(f"Критическая ошибка при запуске: {e}")
 
 if __name__ == '__main__':
     main()
